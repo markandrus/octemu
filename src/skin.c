@@ -58,7 +58,10 @@ static struct {
 
 static SDL_Window *g_win;
 static SDL_Renderer *g_ren;
-static struct { float scale, offx, offy, dpr; } g_view;
+/* mpx: renderer pixels per mouse-event unit. SDL2 reports the mouse in points
+ * (mpx == dpr); sdl2-compat on SDL3 reports it in pixels on a retina display
+ * (mpx == 1). mouse_px records which, learned by skin_view_calibrate. */
+static struct { float scale, offx, offy, dpr, mpx; bool mouse_px; } g_view;
 
 /* The fb_gen the screen texture currently holds; see skin_render. */
 static uint32_t g_screen_gen;
@@ -277,6 +280,7 @@ void skin_view_update(void)
     SDL_GetRendererOutputSize(g_ren, &dw, &dh);
     SDL_GetWindowSize(g_win, &ww, &wh);
     g_view.dpr = ww ? (float)dw / ww : 1;
+    g_view.mpx = g_view.mouse_px ? 1 : g_view.dpr;
     sx = (float)dw / g_skin.vbw;
     sy = (float)dh / g_skin.vbh;
     g_view.scale = sx < sy ? sx : sy;
@@ -293,14 +297,36 @@ static SDL_FRect view_rect(float x, float y, float w, float h)
 
 void skin_view_mouse(int wx, int wy, float *sx, float *sy)
 {
-    *sx = (wx * g_view.dpr - g_view.offx) / g_view.scale;
-    *sy = (wy * g_view.dpr - g_view.offy) / g_view.scale;
+    *sx = (wx * g_view.mpx - g_view.offx) / g_view.scale;
+    *sy = (wy * g_view.mpx - g_view.offy) / g_view.scale;
 }
 
 void skin_view_window(float sx, float sy, int *wx, int *wy)
 {
-    *wx = (int)((g_view.offx + sx * g_view.scale) / g_view.dpr);
-    *wy = (int)((g_view.offy + sy * g_view.scale) / g_view.dpr);
+    *wx = (int)((g_view.offx + sx * g_view.scale) / g_view.mpx);
+    *wy = (int)((g_view.offy + sy * g_view.scale) / g_view.mpx);
+}
+
+/* Learn the unit of a REAL mouse event (ex, ey) by setting it against the OS
+ * cursor, which SDL always reports in points. Only a retina display can tell
+ * the two apart, and only far enough from the window's corner that the 2x is
+ * unambiguous. Never feed it a scripted event: those carry no cursor. */
+void skin_view_calibrate(int ex, int ey)
+{
+    int gx, gy, px, py;
+
+    if (g_view.dpr < 1.5f) {
+        return;
+    }
+    SDL_GetGlobalMouseState(&gx, &gy);
+    SDL_GetWindowPosition(g_win, &px, &py);
+    gx -= px;
+    gy -= py;
+    if (gx + gy < 40) {
+        return;
+    }
+    g_view.mouse_px = (ex + ey) > (gx + gy) * (1 + g_view.dpr) / 2;
+    g_view.mpx = g_view.mouse_px ? 1 : g_view.dpr;
 }
 
 void skin_window(SDL_Window *win, SDL_Renderer *ren)

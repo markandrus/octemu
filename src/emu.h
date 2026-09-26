@@ -118,6 +118,7 @@ bool skin_over_control(float x, float y);
 int skin_knob_at(float x, float y);          /* encoder index, or -1 */
 void skin_view_mouse(int wx, int wy, float *sx, float *sy);
 void skin_view_window(float sx, float sy, int *wx, int *wy);
+void skin_view_calibrate(int ex, int ey);    /* real mouse events only */
 void skin_shot(const char *path);
 /* The rendered panel as RGB24 at dw x dh (box-downscaled), and the renderer's
  * own output size. Render thread only — see skin.c. */

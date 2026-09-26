@@ -707,6 +707,9 @@ int main(int argc, char **argv)
                 if (ev.button.button != SDL_BUTTON_LEFT) {
                     break;
                 }
+                if (!g.script) {
+                    skin_view_calibrate(ev.button.x, ev.button.y);
+                }
                 skin_view_mouse(ev.button.x, ev.button.y, &lx, &ly);
                 if (ev.type == SDL_MOUSEBUTTONDOWN) {
                     skin_mouse_down(lx, ly, ctrl);
@@ -719,6 +722,9 @@ int main(int argc, char **argv)
                 float lx, ly;
                 bool over;
 
+                if (!g.script) {
+                    skin_view_calibrate(ev.motion.x, ev.motion.y);
+                }
                 skin_view_mouse(ev.motion.x, ev.motion.y, &lx, &ly);
                 skin_mouse_motion(lx, ly);
                 over = skin_over_control(lx, ly);
