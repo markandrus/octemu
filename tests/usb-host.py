@@ -557,6 +557,11 @@ def uac2_clock_requests(b, hs=True):
       GET CUR   CS_SAM_FREQ_CONTROL -> 44100
       GET CUR   CS_CLOCK_VALID      -> 1
       GET CUR   of an unsupported selector -> STALL (the stock handler)
+      SET CUR   CS_SAM_FREQ_CONTROL 44100 -> data stage taken, status ACKed
+                (the clock is fixed, but some UAC2 hosts SET the rate they
+                have just read and give the device up if it STALLs)
+      SET CUR   CS_SAM_FREQ_CONTROL 48000 -> the status stage STALLs, and
+                EP0 answers the next request
       GET_MAX_LUN on interface 0    -> still answered (the shim only
                                         intercepts the audio AC interface)
 
@@ -604,6 +609,39 @@ def uac2_clock_requests(b, hs=True):
         ok = False
     except Stall:
         print("  ok: unknown entity -> STALL")
+
+    def set_cur_freq(rate):
+        """SET CUR of the clock's sample frequency: SETUP, the 4-byte OUT data
+        stage, then the IN status stage. Returns "ACK", "status STALL",
+        "data-stage STALL" or "data stage never accepted"."""
+        b.setup(0x21, 1, 1 << 8, widx, 4)
+        try:
+            b.ep_out(0, struct.pack("<I", rate), timeout=10)
+        except Stall:
+            return "data-stage STALL"
+        except TimeoutError:
+            return "data stage never accepted"
+        try:
+            b.ep_in(0, 64)
+            return "ACK"
+        except Stall:
+            return "status STALL"
+
+    for rate, want in ((44100, "ACK"), (48000, "status STALL")):
+        got = set_cur_freq(rate)
+        if got == want:
+            print(f"  ok: SET CUR sample frequency {rate} -> {got}")
+        else:
+            print(f"  ✗ SET CUR sample frequency {rate} -> {got}, want {want}")
+            ok = False
+            if got == "data stage never accepted":
+                return False                 # EP0 is still waiting on it
+        if rate == 44100:
+            expect("CUR sample frequency after SET CUR 44100",
+                   b.ctrl_in(0xA1, 1, 1 << 8, widx, 4), struct.pack("<I", 44100))
+    expect("RANGE sample frequency after the rejected SET CUR",
+           b.ctrl_in(0xA1, 2, 1 << 8, widx, 14),
+           struct.pack("<H", 1) + struct.pack("<III", 44100, 44100, 0))
     lun = b.ctrl_in(0xA1, 0xFE, 0, 0, 1)
     if len(lun) == 1:
         print(f"  ok: MSC GET_MAX_LUN still answered ({lun.hex()})")

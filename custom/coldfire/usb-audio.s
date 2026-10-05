@@ -74,6 +74,11 @@
 .set EPPRIME,    0xfc0b01b0
 .set EPFLUSH,    0xfc0b01b4
 .set EPCOMPLETE, 0xfc0b01bc
+.set SETUPSTAT,  0xfc0b01ac         | ENDPTSETUPSTAT
+.set EP0CTRL,    0xfc0b01c0         | ENDPTCTRL0: bit 16 = EP0 IN (TX) stall
+.set EP0OUT_DTD, 0x4ec95000         | the stock EP0 OUT dTD (usb_ep0_send's status OUT)
+.set EP0_BUF,    0x4ec96000         | ... and its 64-byte buffer
+.set QH0_OUT_PTR,0x46c8ce18         | -> EP0 OUT dQH
 .set ENDPTCTRL3, 0xfc0b01cc
 .set USBCMD,     0xfc0b0140
 .set ATDTW,      0x00004000         | USBCMD bit 14: the add-dTD tripwire
@@ -656,8 +661,23 @@ audio_ep0page_shim:
 | and runs the original displaced instruction.
     .global audio_isr_shim
 audio_isr_shim:
-    lea     %sp@(-8),%sp
-    moveml  %d0-%d1,%sp@            | all this shim touches
+    lea     %sp@(-16),%sp
+    moveml  %d0-%d1/%a0-%a1,%sp@    | all this shim touches
+    | A clock SET_CUR whose data stage outlived audio_ctrl_shim's wait: a new
+    | SETUP means the host gave it up; otherwise its OUT completion is ours,
+    | taken before the stock completion loop can see it.
+    tstb    uac2_set_pending
+    beqs    4f
+    movel   SETUPSTAT,%d0
+    btst    #0,%d0
+    beqs    3f
+    clrb    uac2_set_pending        | superseded by a new SETUP
+    bras    4f
+3:  movel   EPCOMPLETE,%d0
+    btst    #0,%d0                  | EP0 OUT
+    beqs    4f
+    bsr     uac2_set_done
+4:
     | ☠ Exactly ONE place queues packets on EP3: the per-block producer in
     | frame_isr. This shim only retires the completion bit so it cannot go
     | stale; the queue's own state is the ACTIVE bit of each dTD, which the
@@ -670,8 +690,8 @@ audio_isr_shim:
     beqs    2f
     movel   #EP3IN_BIT,%d1
     movel   %d1,EPCOMPLETE          | W1C EP3 IN
-2:  moveml  %sp@,%d0-%d1
-    lea     %sp@(8),%sp
+2:  moveml  %sp@,%d0-%d1/%a0-%a1
+    lea     %sp@(16),%sp
     jmp     USBMIDI_ISR_SHIM
 
 | ---- the iso packet builder -------------------------------------------------
@@ -1405,8 +1425,9 @@ audio_frame_shim_body:
 | rate before it will publish a device (RANGE + CUR of CS_SAM_FREQ_CONTROL,
 | CUR of CS_CLOCK_VALID_CONTROL, all class GET to the AudioControl interface
 | with the entity id in wIndex's high byte), and a STALL there means no
-| audio device. Everything else falls through to the stock STALL, which is
-| the legal answer for a control we do not implement.
+| audio device. A SET CUR of that rate is taken too (.Lctrl_set). Everything
+| else falls through to the stock STALL, which is the legal answer for a
+| control we do not implement.
 |
 | Reply the way the stock string-descriptor path does: push the buffer and
 | min(wLength, len) and jump to the shared usb_ep0_send tail. d2 still holds
@@ -1417,6 +1438,8 @@ audio_frame_shim_body:
     .global audio_ctrl_shim
 audio_ctrl_shim:
     mvzb    SETUP_BMREQ,%d0
+    cmpil   #0x21,%d0               | class SET, interface recipient
+    beq     .Lctrl_set
     cmpil   #0xa1,%d0               | class GET, interface recipient
     bne     .Lctrl_stock
     mvzb    SETUP_IFACE,%d0
@@ -1453,9 +1476,80 @@ audio_ctrl_shim:
     movel   %d2,%d0
 1:  movel   %d0,%sp@-
     jmp     EP0_SEND_TAIL
+| ---- SET CUR of the clock's sample frequency ---------------------------------
+| The clock is fixed and its frequency control is declared read-only, but a
+| UAC2 host may still SET it to the rate it has just read back (CUR, 4
+| bytes), and some hosts give the audio function up when that STALLs. So a
+| SET CUR of CS_SAM_FREQ_CONTROL on this clock is taken: 44100, the one rate
+| RANGE offers, is acknowledged and changes nothing; any other rate STALLs
+| the status stage. Every other class SET still STALLs at once (stock).
+| The stock EP0 stack has no control OUT data stage, so this primes EP0's OUT
+| dTD for it exactly as usb_ep0_send primes its status OUT, and waits here
+| for the data: returning first races the stock completion loop that runs
+| right after this request in the same interrupt, which would take a data
+| stage that lands by then for the previous transfer's status OUT. A host
+| sends it in the next microframe; 100,000 polls (~10 ms) is the bound, and
+| audio_isr_shim finishes it for a host slower than that.
+.Lctrl_set:
+    mvzb    SETUP_IFACE,%d0
+    cmpil   #UAC2_AC_IFACE,%d0      | the audio function's AudioControl
+    bne     .Lctrl_stock
+    mvzb    SETUP_WIDXH,%d0
+    cmpil   #UAC2_CLOCK_ID,%d0      | the clock source entity
+    bne     .Lctrl_stock
+    mvzb    SETUP_WVALH,%d0
+    cmpil   #1,%d0                  | CS_SAM_FREQ_CONTROL
+    bne     .Lctrl_stock
+    mvzb    SETUP_BREQ,%d0
+    cmpil   #1,%d0                  | CUR
+    bne     .Lctrl_stock
+    moveq   #4,%d0
+    cmpl    %d0,%d2                 | wLength
+    bne     .Lctrl_stock
+    movel   #0x00408080,%d0         | 64 bytes, IOC, ACTIVE (usb_ep0_send's status OUT)
+    movel   %d0,EP0OUT_DTD+4
+    movel   #EP0_BUF,%d0
+    movel   %d0,EP0OUT_DTD+8
+    movel   #0xdead0001,%d0         | next: terminate
+    movel   %d0,EP0OUT_DTD
+    moveal  QH0_OUT_PTR,%a0
+    movel   #EP0OUT_DTD,%d0
+    movel   %d0,%a0@(8)             | dQH next dTD
+    movel   EPPRIME,%d0
+    moveq   #1,%d1                  | EP0 OUT
+    orl     %d1,%d0
+    movel   %d0,EPPRIME
+    movel   #100000,%d1
+5:  movel   EP0OUT_DTD+4,%d0
+    btst    #7,%d0                  | ACTIVE
+    beqs    6f
+    subql   #1,%d1
+    bnes    5b
+    moveq   #1,%d0
+    moveb   %d0,uac2_set_pending
+    jmp     SETIFACE_DONE
+6:  bsr     uac2_set_done
+    jmp     SETIFACE_DONE
 .Lctrl_stock:
     movel   0xfc0b01c0,%d0          | displaced
     jmp     CTRL_STOCK
+
+| The data stage of a clock SET CUR has landed in EP0_BUF: take the OUT
+| completion (before the stock loop sees it), then ACK 44100 (status IN) or
+| STALL the status stage. Clobbers d0-d1/a0-a1.
+uac2_set_done:
+    moveq   #1,%d0
+    movel   %d0,EPCOMPLETE          | W1C EP0 OUT
+    clrb    uac2_set_pending
+    movel   EP0_BUF,%d0             | wire order: 44 ac 00 00 = 44100
+    cmpil   #0x44ac0000,%d0
+    bnes    1f
+    jsr     EP0_STATUS_IN
+    rts
+1:  movel   EP0CTRL,%d0
+    bset    #16,%d0                 | STALL EP0 IN: the status stage
+    movel   %d0,EP0CTRL
+    rts
 
 | ---- descriptor length-clamp shims -----------------------------------------
 | The stock responder clamps GET_DESCRIPTOR(CONFIG / OTHER_SPEED) replies to a
@@ -1620,6 +1714,7 @@ aud_step:          .long STEP_HS    | frames per packet x100, set by the speed
 aud_ring:          .space AUD_FRAMES*SLOT_BYTES  | 1024 x 16 ch s16 LE
 aud_sum:           .space AUD_FRAMES*4           | 1024 x stereo sum s16 LE
 usbaudio_alt:      .byte 0          | alt setting the host asked for
+uac2_set_pending:  .byte 0          | a clock SET CUR's data stage is primed
 aud_running:       .byte 0          | EP3 is up (frame-ISR owned)
 aud_hs:            .byte 0          | 1 = high speed (16 ch), 0 = full (sum)
 aud_tail:          .byte 0          | next dTD slot to fill (0/1)

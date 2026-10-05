@@ -167,10 +167,12 @@ def config_descriptor(hs, other_speed=False):
     # The host learns the (only) sample rate through class requests to the
     # clock source (RANGE + CUR of CS_SAM_FREQ_CONTROL, CUR of CLOCK_VALID),
     # answered by the payload's EP0 shim (cf/usb-audio.s audio_ctrl_shim).
-    # ☠ The clock frequency control is READ-ONLY (bmControls 0b01): a
-    # host-programmable clock would oblige us to accept SET_CUR, a control
-    # OUT with a 4-byte data stage, and the stock EP0 stack has no OUT data
-    # stage at all.
+    # ☠ The clock frequency control is READ-ONLY (bmControls 0b01), and one
+    # rate is all it offers. Read-only does not stop a host SETting it: some
+    # UAC2 hosts SET_CUR the rate they have just read back (a control OUT
+    # with a 4-byte data stage) and give the device up if that STALLs. The
+    # stock EP0 stack has no OUT data stage, so the payload's shim provides
+    # one: SET_CUR 44100 is acknowledged, any other rate STALLs.
     CLK, IT, OT = UAC2_CLOCK_ID, UAC2_IT_ID, UAC2_OT_ID
     clock = bytes([8, 0x24, 0x0A, CLK,
                    0x01,            # bmAttributes: internal fixed clock
